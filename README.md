@@ -4,6 +4,8 @@
 
 A research workspace that turns permitted website pages into searchable sources, structured knowledge graphs, and AI answers.
 
+Save and reopen conversations, export transcripts as Markdown, copy answers, and search recent sources by hostname or page path. Saved chats belong to the signed-in account and can be permanently deleted with an explicit confirmation in the interface.
+
 ![Sourcebook welcome screen](docs/welcome.png)
 
 Three backend services plus one React frontend. This is runnable foundational code with production-oriented boundaries, not a production-certified deployment. The supplied classifier is a demo because no trained model or evaluation dataset was provided.
@@ -151,7 +153,11 @@ Neo4j stores `Page -[:MENTIONS]-> Entity` and `Entity -[:RELATED_TO {kind}]-> En
 | GET /api/sources/policy | Bearer JWT | HTTPS requirement and exact approved hostnames |
 | GET /api/sources | Bearer JWT, owner scoped | indexed chunk count and 20 most recent jobs |
 | GET /api/jobs/:id | Bearer JWT, owner scoped | status, result, safe error |
-| POST /api/chat | Bearer JWT | `{message}` -> `{answer,sources}` |
+| GET /api/conversations | Bearer JWT, owner scoped | 50 most recently updated chat titles |
+| POST /api/conversations | Bearer JWT | `{}` -> new saved conversation |
+| GET /api/conversations/:id | Bearer JWT, owner scoped | saved transcript and source links |
+| DELETE /api/conversations/:id | Bearer JWT, owner scoped | permanently deletes the transcript |
+| POST /api/chat | Bearer JWT | `{message,conversationId?}` -> `{answer,sources}`; saves a successful turn when an ID is provided |
 | POST /api/classify | Bearer JWT | `{text}` -> prediction; Node calls FastAPI |
 | POST /internal/jobs/:id/index | Internal token and active lease | `{text,leaseToken}` -> `{chunks}` |
 | POST /predict on ML | ML service token | `{text}` -> `{label,confidence,model_version,demo}` |
@@ -161,6 +167,8 @@ Neo4j stores `Page -[:MENTIONS]-> Entity` and `Entity -[:RELATED_TO {kind}]-> En
 No secrets are included. Obtain a Gemini key independently and choose model IDs available to your account. Models are configurable. Changing embedding models requires reindexing into new collections; do not mix vector dimensions or incompatible embedding spaces.
 
 The frontend restores recent job status after sign-in and checks source readiness every five seconds. Chat is enabled only when the signed-in account has indexed chunks. Sources remain private to their owner, including accounts used for smoke tests.
+
+Saved conversations retain up to 100 successful question/answer pairs. The UI loads the 50 most recently updated conversations. Saved transcript text is not sent as model memory: each question retrieves independently from the account's indexed pages. Conversation deletion removes its MongoDB transcript, not the indexed sources or graph data. Markdown export downloads the visible transcript and source links to your device; treat exports as private data. Source search filters the 20 most recent jobs returned by the API.
 
 ## Classifier contract
 
@@ -178,7 +186,7 @@ py -3.12 -m venv .venv
 .venv\Scripts\python -m pytest tests -q
 ```
 
-The local verification suite contains 10 Node tests and 15 Python tests. CI runs these checks without real API keys or private data. Live integration checks require your own configured credentials and permitted source.
+The local verification suite contains 14 Node tests and 15 Python tests. CI runs these checks without real API keys or private data. Live integration checks require your own configured credentials and permitted source.
 
 GitHub Actions runs the Node tests and frontend build, Python tests and dependency compatibility check, and Compose configuration validation on pushes and pull requests. These checks do not call Gemini or start the database stack. Check the badge above for the latest GitHub run. Passing CI verifies these scoped checks, not a production deployment or model quality.
 

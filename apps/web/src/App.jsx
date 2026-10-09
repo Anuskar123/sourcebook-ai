@@ -18,14 +18,19 @@ export default function App() {
   const [sourceJobs, setSourceJobs] = useState([]);
   const [question, setQuestion] = useState('');
   const [adding, setAdding] = useState(false);
+  const [conversations, setConversations] = useState([]);
+  const [conversationId, setConversationId] = useState('');
+  const [sourceSearch, setSourceSearch] = useState('');
+  const [copied, setCopied] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const conversationEnd = useRef(null);
   const generation = useRef(0);
-  function logout() { generation.current++; setToken(''); setMessages([]); setJob(null); setBusy(false); setAllowedHosts([]); setIndexedChunks(null); setSourceJobs([]); setQuestion(''); }
+  function logout() { generation.current++; setToken(''); setMessages([]); setJob(null); setBusy(false); setAllowedHosts([]); setIndexedChunks(null); setSourceJobs([]); setQuestion(''); setConversations([]); setConversationId(''); setSourceSearch(''); setConfirmDelete(false); setCopied(null); }
   useEffect(() => { conversationEnd.current?.scrollIntoView({block: 'nearest'}); }, [messages, busy]);
 
-  async function api(path, body, signal) {
+  async function api(path, body, signal, method) {
     const response = await fetch(`/api${path}`, {
-      method: body ? 'POST' : 'GET', signal,
+      method: method || (body ? 'POST' : 'GET'), signal,
       headers: {'Content-Type': 'application/json', ...(token ? {Authorization: `Bearer ${token}`} : {})},
       ...(body ? {body: JSON.stringify(body)} : {}),
     });
@@ -52,6 +57,14 @@ export default function App() {
     const timer = setInterval(checkBackend, 10000);
     return () => {active = false; clearInterval(timer); controller.abort();};
   }, []);
+  useEffect(() => {
+    if (!token) return;
+    const controller = new AbortController();
+    api('/conversations', undefined, controller.signal).then(data => {
+      if (!controller.signal.aborted) setConversations(data.conversations);
+    }).catch(e => {if (e.name !== 'AbortError') setError(e.message);});
+    return () => controller.abort();
+  }, [token]);
   useEffect(() => {
     if (!token) return;
     const controller = new AbortController();
@@ -97,10 +110,51 @@ export default function App() {
     setMessages(prev => [...prev, {role: 'user', text: message}]);
     setQuestion(''); setBusy(true);
     try {
-      const result = await api('/chat', {message}, AbortSignal.timeout(60000));
+      let id = conversationId;
+      if (!id) {
+        id = (await api('/conversations', {})).id;
+        if (current !== generation.current) return;
+        setConversationId(id);
+      }
+      const result = await api('/chat', {message, conversationId: id}, AbortSignal.timeout(60000));
       if (current === generation.current) setMessages(prev => [...prev, {role: 'assistant', text: result.answer, sources: result.sources}]);
-    } catch (e) {setError(e.message);}
+      const history = await api('/conversations');
+      if (current === generation.current) setConversations(history.conversations);
+    } catch (e) {if (current === generation.current) setError(e.message);}
     finally {if (current === generation.current) setBusy(false);}
+  }
+  function newConversation() {
+    generation.current++; setConversationId(''); setMessages([]); setQuestion(''); setError(''); setConfirmDelete(false); setCopied(null);
+  }
+  async function openConversation(id) {
+    if (busy) return;
+    const current = ++generation.current;
+    setBusy(true); setError(''); setConfirmDelete(false); setCopied(null);
+    try {
+      const saved = await api(`/conversations/${id}`);
+      if (current === generation.current) {setConversationId(id); setMessages(saved.messages); setQuestion('');}
+    } catch (e) {if (current === generation.current) setError(e.message);}
+    finally {if (current === generation.current) setBusy(false);}
+  }
+  async function deleteConversation() {
+    if (busy || !conversationId) return;
+    const id = conversationId, current = generation.current;
+    setBusy(true);
+    try {
+      await api(`/conversations/${id}`, undefined, undefined, 'DELETE');
+      if (current === generation.current) {setConversations(prev => prev.filter(c => c.id !== id)); newConversation(); setBusy(false);}
+    } catch (e) {if (current === generation.current) {setError(e.message); setBusy(false);}}
+  }
+  async function copyAnswer(text, index) {
+    try {await navigator.clipboard.writeText(text); setCopied(index);}
+    catch {setError('Could not copy. Select the answer text and copy it manually.');}
+  }
+  function exportConversation() {
+    const title = conversations.find(c => c.id === conversationId)?.title || 'Sourcebook conversation';
+    const markdown = `# ${title}\n\n` + messages.map(m => `## ${m.role === 'user' ? 'You' : 'Sourcebook'}\n\n${m.text}\n\n${m.sources?.length ? 'Sources:\n' + m.sources.filter(s => /^https:\/\//.test(s)).map(s => `- ${s}`).join('\n') + '\n\n' : ''}`).join('');
+    const url = URL.createObjectURL(new Blob([markdown], {type: 'text/markdown;charset=utf-8'}));
+    const link = document.createElement('a'); link.href = url; link.download = 'sourcebook-conversation.md'; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   async function indexWebsite(url) {
     setError(''); setAdding(true);
@@ -119,11 +173,13 @@ export default function App() {
   const hostOf = url => { try { return new URL(url).hostname; } catch { return 'Website'; } };
   const sourceEntries = job && !sourceJobs.some(j => j.id === job.id) ? [job, ...sourceJobs] : sourceJobs;
   const visibleSources = sourceEntries.filter((source, index, list) => list.findIndex(item => item.url === source.url) === index);
+  const filteredSources = visibleSources.filter(source => source.url.toLowerCase().includes(sourceSearch.toLowerCase().trim()));
   return <div className={`shell ${token ? 'workspace' : 'welcome'}`}>
     <aside className="sidebar">
       <a className="brand" href="/" aria-label="Sourcebook home"><span className="brand-mark"><Icon name="book"/></span><span>Sourcebook<small>YOUR AI RESEARCH SPACE</small></span></a>
       {token ? <>
-        <button className="new-chat" disabled={busy} onClick={() => {setMessages([]); setQuestion(''); setError('');}}><Icon name="plus"/>New conversation</button>
+        <button className="new-chat" disabled={busy} onClick={newConversation}><Icon name="plus"/>New conversation</button>
+        <details className="conversation-history" open><summary>Saved conversations <span>{conversations.length}</span></summary><div className="history-list">{conversations.length ? conversations.map(c => <button key={c.id} disabled={busy} onClick={() => openConversation(c.id)} aria-current={conversationId === c.id ? 'true' : undefined} title={c.title}><Icon name="chat"/><span>{c.title}</span></button>) : <p>Your conversations will be saved here.</p>}</div></details>
         <div className="section-label">YOUR SOURCES<span>{visibleSources.length}</span></div>
         <form onSubmit={addWebsite} className="source-form">
           <label htmlFor="url">Add a website</label>
@@ -131,9 +187,11 @@ export default function App() {
           <button disabled={processing || !backendReady}><Icon name="plus"/>{adding ? 'Adding source...' : 'Add source'}</button>
           <details id="source-policy"><summary>Which websites can I add?</summary><p>Use HTTPS with one of these exact domains:</p><div className="host-tags">{allowedHosts.map(host => <span key={host}>{host}</span>)}</div><p>To approve another domain, add it to SCRAPE_ALLOWED_HOSTS in the local .env and recreate the API and worker containers. Subdomains need their own entry.</p></details>
         </form>
+        {visibleSources.length > 0 && <><label className="sr-only" htmlFor="source-search">Search sources</label><input className="source-search" id="source-search" type="search" placeholder="Find a saved page..." value={sourceSearch} onChange={e => setSourceSearch(e.target.value)}/></>}
         <div className="source-list" aria-label="Your sources">
           {!sourceJobs.length && <p className="sidebar-hint">Your saved websites will appear here.</p>}
-          {visibleSources.slice(0, 5).map(source => <div className="source-item" key={source.id}><span className="source-icon"><Icon name="link"/></span><div><strong>{hostOf(source.url)}</strong><span className={`source-status ${source.status}`}>{source.status === 'completed' ? 'Ready to use' : source.status === 'failed' ? 'Needs attention' : 'Indexing...'}</span></div>{source.status === 'completed' && <Icon name="check" className="source-check"/>}{source.status === 'failed' && <button className="retry-source" disabled={processing} onClick={() => indexWebsite(source.url)} aria-label={`Retry ${hostOf(source.url)}`}>Retry</button>}</div>)}
+          {visibleSources.length > 0 && !filteredSources.length && <p className="sidebar-hint">No pages match your search.</p>}
+          {filteredSources.map(source => <div className="source-item" key={source.id}><span className="source-icon"><Icon name="link"/></span><div className="source-info"><a href={source.url} target="_blank" rel="noreferrer" title={source.url}><strong>{hostOf(source.url)}</strong><small>{new URL(source.url).pathname}</small></a><span className={`source-status ${source.status}`}>{source.status === 'completed' ? 'Ready to use' : source.status === 'failed' ? 'Needs attention' : 'Indexing...'}</span></div>{source.status === 'completed' && <Icon name="check" className="source-check"/>}{source.status === 'failed' && <button className="retry-source" disabled={processing} onClick={() => indexWebsite(source.url)} aria-label={`Retry ${hostOf(source.url)}`}>Retry</button>}</div>)}
         </div>
         {job?.status === 'failed' && job.error && <p className="source-error" role="status">This source could not be read. Use Retry to try again.</p>}
       </> : <div className="sidebar-intro"><span className="section-label">A LITTLE LESS SEARCHING</span><h2>Your sources.<br/>One conversation.</h2><p>A private place to make sense of the websites that matter to you.</p><div className="sidebar-note"><Icon name="shield"/><span>Your sources stay in your account.</span></div></div>}
@@ -148,9 +206,11 @@ export default function App() {
         <section className="auth"><div className="auth-icon"><Icon name="book"/></div><h2>{mode === 'login' ? 'Welcome back.' : 'Make room for ideas.'}</h2><p>{mode === 'login' ? 'Sign in to your research workspace.' : 'Create your private research workspace.'}</p><form onSubmit={authenticate}><label htmlFor="email">Email address</label><input id="email" name="email" type="email" placeholder="you@example.com" autoComplete="email" required/><label htmlFor="password">Password</label><input id="password" name="password" type="password" placeholder="Enter your password" minLength={12} maxLength={72} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required/><small>At least 12 characters.</small><button disabled={busy || !backendReady}>{busy ? 'Please wait...' : mode === 'login' ? 'Open my workspace' : 'Create workspace'}<Icon name="arrow"/></button></form><div className="auth-switch">{mode === 'login' ? 'New here?' : 'Already have an account?'}<button className="text-button" onClick={() => {setMode(mode === 'login' ? 'register' : 'login'); setError('');}}>{mode === 'login' ? 'Create an account' : 'Sign in'}</button></div><div className="privacy-note"><Icon name="shield"/>Sources are only available to your account.</div></section>
       </div> : <>
         <div className="chat-heading"><div><div className="eyebrow">YOUR RESEARCH ASSISTANT</div><h1>Ask a little. Discover more.</h1></div><div className={`readiness ${ready ? 'ready' : ''}`} role="status"><span/>{ready ? 'Sources ready' : indexedChunks === null ? 'Checking sources' : processing ? 'Reading your website' : failed ? 'Source needs attention' : 'Add a source to begin'}</div></div>
+        <div className="conversation-toolbar"><span>{conversations.find(c => c.id === conversationId)?.title || 'New conversation'}<small>Saved chats retain the transcript. Each question searches your sources independently.</small></span><button className="text-button" onClick={exportConversation} disabled={!messages.length || busy}>Export Markdown</button>{conversationId && <button className="text-button" disabled={busy} onClick={() => setConfirmDelete(!confirmDelete)}>Delete chat</button>}</div>
+        {confirmDelete && <div className="delete-confirm" role="status"><span>Delete this saved conversation permanently?</span><button disabled={busy} onClick={deleteConversation}>Delete conversation</button><button className="text-button" onClick={() => setConfirmDelete(false)}>Cancel</button></div>}
         <section className="messages" aria-label="Conversation" aria-live="polite">
           {!messages.length && <div className="empty"><div className="empty-icon"><Icon name="chat"/></div><h2>{ready ? 'What would you like to know?' : failed ? "Let's give that source another try." : 'Good answers start with a source.'}</h2><p>{ready ? 'Explore your saved pages with a question. Every answer stays grounded in your sources.' : processing ? 'Your website is being read and indexed. We will enable chat as soon as it is ready.' : failed ? 'We could not finish reading your page. Use Retry in the source panel, or add a different website.' : 'Add a website in the source panel. Once it is ready, you can ask about its contents.'}</p><div className="prompt-grid">{suggestions.map((prompt, i) => <button key={prompt} disabled={!ready || busy} onClick={() => setQuestion(prompt)}><span>0{i + 1}</span><strong>{['Get the big picture', 'Find the main topics', 'Explore key details'][i]}</strong><p>{prompt}</p><Icon name="arrow"/></button>)}</div><p className="empty-note">A useful place to start: a company, project, or reference page.</p></div>}
-          {messages.map((m, i) => <article key={i} className={`message ${m.role}`}><div className="message-avatar">{m.role === 'user' ? 'Y' : <Icon name="book"/>}</div><div className="message-body"><strong>{m.role === 'user' ? 'You' : 'Sourcebook'}{m.role === 'assistant' && <span className="answer-label">FROM YOUR SOURCES</span>}</strong><p>{m.text}</p>{m.sources?.length > 0 && <div className="sources"><span>Explore the sources</span>{m.sources.filter(s => /^https:\/\//.test(s)).map(s => <a key={s} href={s} target="_blank" rel="noreferrer"><Icon name="link"/>{hostOf(s)}<Icon name="arrow"/></a>)}</div>}</div></article>)}
+          {messages.map((m, i) => <article key={i} className={`message ${m.role}`}><div className="message-avatar">{m.role === 'user' ? 'Y' : <Icon name="book"/>}</div><div className="message-body"><strong>{m.role === 'user' ? 'You' : 'Sourcebook'}{m.role === 'assistant' && <span className="answer-label">FROM YOUR SOURCES</span>}</strong><p>{m.text}</p>{m.sources?.length > 0 && <div className="sources"><span>Explore the sources</span>{m.sources.filter(s => /^https:\/\//.test(s)).map(s => <a key={s} href={s} target="_blank" rel="noreferrer"><Icon name="link"/>{hostOf(s)}<Icon name="arrow"/></a>)}</div>}{m.role === 'assistant' && <button className="text-button copy-answer" onClick={() => copyAnswer(m.text, i)}>{copied === i ? 'Copied' : 'Copy answer'}</button>}</div></article>)}
           {busy && <div className="thinking" role="status"><span className="pulse"/>Reading your sources and putting an answer together...</div>}
           <div ref={conversationEnd}/>
         </section>

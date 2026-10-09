@@ -69,3 +69,58 @@ test('invalid JSON and readiness failure have explicit statuses', async () => {
   await request(make({databaseReady: () => false})).get('/health/ready').expect(503);
   await request(make({rag: {ready: async () => {}}})).get('/api/health').expect(200);
 });
+
+function conversationStore() {
+  const records = new Map();
+  const id = 'c'.repeat(24);
+  return {
+    records,
+    create: async data => {const record = {_id: id, title: 'New conversation', messages: [], ...data}; records.set(id, record); return record;},
+    find: query => ({sort: () => ({limit: () => ({select: () => ({lean: async () => [...records.values()].filter(c => c.ownerId === query.ownerId)})})})}),
+    findOne: query => ({select: () => ({lean: async () => {const record = records.get(query._id); return record?.ownerId === query.ownerId ? structuredClone(record) : null;}})}),
+    deleteOne: async query => {const record = records.get(query._id); if (record?.ownerId !== query.ownerId) return {deletedCount: 0}; records.delete(query._id); return {deletedCount: 1};},
+    updateOne: async (query, update) => {const record = records.get(query._id); if (record?.ownerId !== query.ownerId || record.messages.length >= 199) return {matchedCount: 0}; record.messages.push(...update.$push.messages.$each); Object.assign(record, update.$set); return {matchedCount: 1};},
+  };
+}
+test('saved conversations require authentication and cannot expose another account', async () => {
+  const store = conversationStore();
+  const app = make({Conversation: store});
+  await request(app).get('/api/conversations').expect(401);
+  await request(app).post('/api/conversations').auth(token, {type: 'bearer'}).send({ownerId: 'victim'}).expect(400);
+  const created = await request(app).post('/api/conversations').auth(token, {type: 'bearer'}).send({}).expect(201);
+  const other = jwt.sign({}, config.JWT_SECRET, {subject: 'd'.repeat(24), issuer: 'portfolio-api', audience: 'portfolio-web'});
+  await request(app).get(`/api/conversations/${created.body.id}`).auth(other, {type: 'bearer'}).expect(404);
+  await request(app).delete(`/api/conversations/${created.body.id}`).auth(other, {type: 'bearer'}).expect(404);
+  const list = await request(app).get('/api/conversations').auth(other, {type: 'bearer'}).expect(200);
+  assert.deepEqual(list.body.conversations, []);
+});
+test('chat transcript can be reopened and removed with source links preserved', async () => {
+  const store = conversationStore();
+  const app = make({Conversation: store, rag: {answer: async () => ({answer: 'Grounded answer', sources: ['https://example.com/']})}});
+  const created = await request(app).post('/api/conversations').auth(token, {type: 'bearer'}).send({}).expect(201);
+  const id = created.body.id;
+  await request(app).post('/api/chat').auth(token, {type: 'bearer'}).send({message: 'What is this page?', conversationId: id}).expect(200);
+  const saved = await request(app).get(`/api/conversations/${id}`).auth(token, {type: 'bearer'}).expect(200);
+  assert.equal(saved.body.title, 'What is this page?');
+  assert.deepEqual(saved.body.messages, [{role: 'user', text: 'What is this page?', sources: []}, {role: 'assistant', text: 'Grounded answer', sources: ['https://example.com/']}]);
+  await request(app).delete(`/api/conversations/${id}`).auth(token, {type: 'bearer'}).expect(200);
+  await request(app).get(`/api/conversations/${id}`).auth(token, {type: 'bearer'}).expect(404);
+});
+test('missing, foreign, and full conversations never trigger model calls', async () => {
+  const store = conversationStore();
+  let calls = 0;
+  const app = make({Conversation: store, rag: {answer: async () => {calls++; return {};}}});
+  await request(app).post('/api/chat').auth(token, {type: 'bearer'}).send({message: 'hi', conversationId: 'e'.repeat(24)}).expect(404);
+  const c = await store.create({ownerId: 'd'.repeat(24)});
+  await request(app).post('/api/chat').auth(token, {type: 'bearer'}).send({message: 'hi', conversationId: c._id}).expect(404);
+  c.ownerId = owner; c.messages = Array.from({length: 200}, () => ({role: 'user', text: 'earlier'}));
+  await request(app).post('/api/chat').auth(token, {type: 'bearer'}).send({message: 'hi', conversationId: c._id}).expect(409);
+  assert.equal(calls, 0);
+});
+test('a conversation removed during generation cannot be recreated by a late response', async () => {
+  const store = conversationStore();
+  const c = await store.create({ownerId: owner});
+  const app = make({Conversation: store, rag: {answer: async () => {store.records.delete(c._id); return {answer: 'late', sources: []};}}});
+  await request(app).post('/api/chat').auth(token, {type: 'bearer'}).send({message: 'hi', conversationId: c._id}).expect(409);
+  assert.equal(store.records.size, 0);
+});

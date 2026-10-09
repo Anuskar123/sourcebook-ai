@@ -7,7 +7,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 
-export function createApp({config, User, Job, rag, databaseReady}) {
+export function createApp({config, User, Job, Conversation, rag, databaseReady}) {
   const app = express();
   app.disable('x-powered-by');
   app.use(helmet(), cors({origin: config.WEB_ORIGIN}), express.json({limit: '128kb'}));
@@ -48,9 +48,43 @@ export function createApp({config, User, Job, rag, databaseReady}) {
     ]);
     res.json({indexedChunks, jobs: jobs.map(job => ({id: String(job._id), url: job.url, status: job.status, error: job.error}))});
   });
+  const objectId = z.string().regex(/^[a-f0-9]{24}$/);
+  app.get('/api/conversations', async (req, res) => {
+    const items = await Conversation.find({ownerId: req.owner}).sort({updatedAt: -1}).limit(50).select('title updatedAt').lean();
+    res.json({conversations: items.map(c => ({id: String(c._id), title: c.title, updatedAt: c.updatedAt}))});
+  });
+  app.post('/api/conversations', async (req, res) => {
+    z.object({}).strict().parse(req.body);
+    const c = await Conversation.create({ownerId: req.owner});
+    res.status(201).json({id: String(c._id), title: c.title, messages: []});
+  });
+  app.get('/api/conversations/:id', async (req, res) => {
+    const c = await Conversation.findOne({_id: objectId.parse(req.params.id), ownerId: req.owner}).select('title messages updatedAt').lean();
+    if (!c) return res.status(404).json({error: 'Conversation not found'});
+    res.json({id: String(c._id), title: c.title, messages: c.messages, updatedAt: c.updatedAt});
+  });
+  app.delete('/api/conversations/:id', async (req, res) => {
+    const result = await Conversation.deleteOne({_id: objectId.parse(req.params.id), ownerId: req.owner});
+    if (!result.deletedCount) return res.status(404).json({error: 'Conversation not found'});
+    res.json({deleted: true});
+  });
   app.post('/api/chat', async (req, res) => {
-    const {message} = z.object({message: z.string().trim().min(1).max(4000)}).strict().parse(req.body);
-    res.json(await rag.answer(req.owner, message));
+    const {message, conversationId} = z.object({message: z.string().trim().min(1).max(4000), conversationId: objectId.optional()}).strict().parse(req.body);
+    let conversation;
+    if (conversationId) {
+      conversation = await Conversation.findOne({_id: conversationId, ownerId: req.owner}).select('messages title').lean();
+      if (!conversation) return res.status(404).json({error: 'Conversation not found'});
+      if (conversation.messages.length >= 200) return res.status(409).json({error: 'This conversation is full. Start a new conversation.'});
+    }
+    const result = await rag.answer(req.owner, message);
+    if (conversationId) {
+      const saved = await Conversation.updateOne({_id: conversationId, ownerId: req.owner, 'messages.198': {$exists: false}}, {
+        $push: {messages: {$each: [{role: 'user', text: message, sources: []}, {role: 'assistant', text: result.answer, sources: result.sources}]}},
+        ...(conversation.messages.length === 0 ? {$set: {title: message.slice(0, 80)}} : {}),
+      });
+      if (!saved.matchedCount) return res.status(409).json({error: 'Conversation changed or was removed. Reopen it or start a new conversation.'});
+    }
+    res.json(result);
   });
   app.post('/api/jobs', async (req, res) => {
     const {url} = z.object({url: z.url().max(2048)}).strict().parse(req.body);

@@ -14,3 +14,14 @@ const jobSchema = new mongoose.Schema({
 jobSchema.index({status: 1, availableAt: 1, leaseUntil: 1});
 export const User = mongoose.model('User', userSchema);
 export const Job = mongoose.model('Job', jobSchema);
+const messageSchema = new mongoose.Schema({
+  role: {type: String, enum: ['user', 'assistant'], required: true},
+  text: {type: String, required: true}, sources: [String],
+}, {_id: false});
+const conversationSchema = new mongoose.Schema({
+  ownerId: {type: String, required: true},
+  title: {type: String, default: 'New conversation'},
+  messages: {type: [messageSchema], default: []},
+}, {timestamps: true});
+conversationSchema.index({ownerId: 1, updatedAt: -1});
+export const Conversation = mongoose.model('Conversation', conversationSchema);
