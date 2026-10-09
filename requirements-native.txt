@@ -1,0 +1,3 @@
+-r services/worker/requirements.txt
+-r services/ml/requirements.txt
+chromadb==1.5.0

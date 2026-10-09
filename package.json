@@ -1,0 +1,18 @@
+{
+  "name": "ai-portfolio", "version": "0.1.0", "private": true,
+  "workspaces": ["apps/web", "services/api"],
+  "engines": {"node": ">=22.12.0"},
+  "scripts": {
+    "setup": "node scripts/init-env.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "start": "node scripts/stack.mjs up",
+    "stop": "node scripts/stack.mjs down",
+    "status": "node scripts/stack.mjs status",
+    "logs": "node scripts/stack.mjs logs",
+    "smoke": "node scripts/smoke.mjs",
+    "dev:web": "npm run dev -w @portfolio/web",
+    "dev:api": "npm run dev -w @portfolio/api",
+    "build": "npm run build -w @portfolio/web",
+    "test": "npm run test -w @portfolio/api"
+  }
+}

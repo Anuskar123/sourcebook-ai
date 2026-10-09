@@ -1,0 +1,96 @@
+name: ai-portfolio
+services:
+  mongo:
+    image: mongo:8.0
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?Set MONGO_PASSWORD}
+    ports: ["127.0.0.1:${MONGO_HOST_PORT:-27018}:27017"]
+    volumes: ["mongo_data:/data/db"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "quit(db.adminCommand('ping').ok ? 0 : 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  neo4j:
+    image: neo4j:5.26-community
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?Set NEO4J_PASSWORD}
+    ports: ["127.0.0.1:7474:7474", "127.0.0.1:7687:7687"]
+    volumes: ["neo4j_data:/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+  chroma:
+    image: chromadb/chroma:1.5.0
+    restart: unless-stopped
+    ports: ["127.0.0.1:8000:8000"]
+    volumes: ["chroma_data:/data"]
+  ml:
+    build: ./services/ml
+    restart: unless-stopped
+    environment:
+      ML_API_TOKEN: ${ML_API_TOKEN:?Set ML_API_TOKEN}
+      MODEL_PATH: /app/models/classifier.joblib
+    ports: ["127.0.0.1:8001:8001"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+  api:
+    profiles: [app]
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    env_file: .env
+    environment:
+      MONGODB_URI: mongodb://root:${MONGO_PASSWORD}@mongo:27017/portfolio?authSource=admin
+      CHROMA_URL: http://chroma:8000
+      ML_API_URL: http://ml:8001
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on:
+      mongo: {condition: service_healthy}
+      chroma: {condition: service_started}
+      ml: {condition: service_healthy}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+  worker:
+    profiles: [app]
+    build: ./services/worker
+    env_file: .env
+    environment:
+      MONGODB_URI: mongodb://root:${MONGO_PASSWORD}@mongo:27017/portfolio?authSource=admin
+      NEO4J_URI: bolt://neo4j:7687
+      API_URL: http://api:3000
+      ML_API_URL: http://ml:8001
+    depends_on:
+      api: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+      ml: {condition: service_healthy}
+    restart: unless-stopped
+    init: true
+  web:
+    profiles: [app]
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports: ["127.0.0.1:5173:8080"]
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+volumes:
+  mongo_data:
+  neo4j_data:
+  chroma_data:

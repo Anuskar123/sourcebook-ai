@@ -1,0 +1,17 @@
+node_modules
+**/node_modules
+**/dist
+.env
+.env.*
+!.env.example
+**/*.pem
+**/*.key
+**/*.log
+**/*.joblib
+work
+runtime
+data
+.git
+**/.venv
+**/__pycache__
+**/.pytest_cache
