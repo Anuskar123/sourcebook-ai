@@ -192,6 +192,8 @@ GitHub Actions runs the Node tests and frontend build, Python tests and dependen
 
 ## Before production deployment
 
+Known Chroma dependency alerts remain open. See [SECURITY.md](SECURITY.md) for the reviewed advisory details and deployment boundary. Functional CI does not certify the dependency stack as secure.
+
 This boilerplate includes bcrypt, JWT validation, per-user retrieval, input limits, basic rate limiting, service credentials, SSRF-aware fetching, retries, lease fencing and stable sink IDs. Production release still needs:
 
 - An evaluated classifier and end-to-end RAG/extraction quality tests on representative sources.
